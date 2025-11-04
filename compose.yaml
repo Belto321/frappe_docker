@@ -1,9 +1,12 @@
 x-customizable-image: &customizable_image
-  # By default the image used only contains the `frappe` and `erpnext` apps.
-  # See https://github.com/frappe/frappe_docker/blob/main/docs/custom-apps.md
-  # about using custom images.
-  image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-$ERPNEXT_VERSION}
-  pull_policy: ${PULL_POLICY:-always}
+  # Construye la imagen custom que incluye apps de resources/apps.json (via APPS_JSON_BASE64)
+  build:
+    context: .
+    dockerfile: images/custom/Containerfile
+    args:
+      APPS_JSON_BASE64: ${APPS_JSON_BASE64}
+      # opcional si querés fijar rama:
+      # FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-15}
   restart: ${RESTART_POLICY:-unless-stopped}
 
 x-depends-on-configurator: &depends_on_configurator
@@ -90,6 +93,5 @@ services:
     platform: linux/amd64
     command: bench schedule
 
-# ERPNext requires local assets access (Frappe does not)
 volumes:
   sites:
