@@ -5,8 +5,10 @@ x-customizable-image: &customizable_image
     dockerfile: images/custom/Containerfile
     args:
       APPS_JSON_BASE64: ${APPS_JSON_BASE64}
-      # opcional si querés fijar rama:
-      # FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-15}
+      FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-15}
+      FRAPPE_PATH: ${FRAPPE_PATH:-https://github.com/frappe/frappe}
+      PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+      NODE_VERSION: ${NODE_VERSION:-18}
   restart: ${RESTART_POLICY:-unless-stopped}
 
 x-depends-on-configurator: &depends_on_configurator
