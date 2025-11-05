@@ -1,10 +1,10 @@
 x-customizable-image: &customizable_image
-  # Construye la imagen custom que incluye apps de resources/apps.json (via APPS_JSON_BASE64)
+  # Build de la imagen base SIN inyectar apps en build (evitamos bench init durante el build)
   build:
     context: .
     dockerfile: images/custom/Containerfile
     args:
-      APPS_JSON_BASE64: ${APPS_JSON_BASE64}
+      # IMPORTANTE: NO pasamos APPS_JSON_BASE64 en build para evitar apps_path en bench init
       FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-15}
       FRAPPE_PATH: ${FRAPPE_PATH:-https://github.com/frappe/frappe}
       PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
@@ -59,7 +59,8 @@ services:
     environment:
       BACKEND: backend:8000
       SOCKETIO: websocket:9000
-      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-$$host}
+      # Evitamos $$host para que no se expanda; fijamos fallback al dominio
+      FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-crm.apps.asomstudio.ai}
       UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
       UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
       UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
@@ -94,6 +95,37 @@ services:
     <<: *backend_defaults
     platform: linux/amd64
     command: bench schedule
+
+  # -----------------------------
+  # Job one-shot para instalar CRM en runtime
+  # -----------------------------
+  post-install-crm:
+    <<: *backend_defaults
+    platform: linux/amd64
+    depends_on:
+      backend:
+        condition: service_started
+      configurator:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -lc
+      - |
+        echo ">>> Esperando que bench esté listo..."
+        # esperamos a que exista /home/frappe/frappe-bench y bench responda
+        for i in $(seq 1 90); do
+          bench --version >/dev/null 2>&1 && break
+          sleep 2
+        done
+
+        echo ">>> Clonando app CRM..."
+        bench get-app crm https://github.com/frappe/crm --branch main
+
+        echo ">>> Instalando CRM en el sitio ${SITE_NAME}..."
+        bench --site ${SITE_NAME} install-app crm || exit 1
+
+        echo ">>> Post-install CRM finalizado."
+    restart: "no"
 
 volumes:
   sites:
