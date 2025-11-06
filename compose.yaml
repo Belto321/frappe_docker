@@ -1,25 +1,32 @@
 x-image: &image
-  image: your-registry/erpnext-crm:v15   # <— tu imagen personalizada ya con CRM
+  build:
+    context: .
+    dockerfile: images/custom/Containerfile
+    args:
+      APPS_JSON_BASE64: ${APPS_JSON_BASE64}
+      FRAPPE_BRANCH: ${FRAPPE_BRANCH:-version-15}
+      FRAPPE_PATH: ${FRAPPE_PATH:-https://github.com/frappe/frappe}
+      PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+      NODE_VERSION: ${NODE_VERSION:-18}
   pull_policy: always
   restart: unless-stopped
 
-x-depends: &after_cfg
+x-after_cfg: &after_cfg
   depends_on:
     configurator:
       condition: service_completed_successfully
 
 x-backend: &backend
   <<: [*image, *after_cfg]
+  environment:
+    NODE_OPTIONS: "--max-old-space-size=1024"
+    ESBUILD_MAX_WORKERS: "1"
   volumes:
     - sites:/home/frappe/frappe-bench/sites
     - assets:/home/frappe/frappe-bench/sites/assets
-  environment:
-    # Evitar OOM en runtime builds eventuales
-    NODE_OPTIONS: --max-old-space-size=1024
-    ESBUILD_MAX_WORKERS: "1"
 
 services:
-  # redis + mariadb (usa los defaults de pwd.yml de frappe_docker)
+  # Infra básica
   redis-cache:
     image: redis:6-alpine
   redis-queue:
@@ -33,62 +40,68 @@ services:
     volumes:
       - db-data:/var/lib/mysql
 
+  # Configurador: escribe common_site_config.json
   configurator:
     <<: *backend
-    entrypoint: [ "bash", "-lc" ]
+    entrypoint: ["bash","-lc"]
     command: >
       ls -1 apps > sites/apps.txt;
       bench set-config -g db_host db;
       bench set-config -gp db_port 3306;
       bench set-config -g redis_cache "redis://redis-cache:6379";
       bench set-config -g redis_queue "redis://redis-queue:6379";
-      bench set-config -g redis_socketio "redis://redis-socketio:6379";
+      bench set-config -g redis_socketio "redis://redis-queue:6379";
       bench set-config -gp socketio_port 9000;
-    restart: on-failure
 
   backend:
     <<: *backend
 
   websocket:
     <<: *image
-    command: [ "node", "/home/frappe/frappe-bench/apps/frappe/socketio.js" ]
+    <<: *after_cfg
+    command: ["node","/home/frappe/frappe-bench/apps/frappe/socketio.js"]
     volumes:
       - sites:/home/frappe/frappe-bench/sites
 
   queue-short:
     <<: *backend
-    command: [ "bench", "worker", "--queue", "short,default" ]
+    command: ["bench","worker","--queue","short,default"]
 
   queue-long:
     <<: *backend
-    command: [ "bench", "worker", "--queue", "long,default,short" ]
+    command: ["bench","worker","--queue","long,default,short"]
 
   scheduler:
     <<: *backend
-    command: [ "bench", "schedule" ]
+    command: ["bench","schedule"]
 
   frontend:
     <<: *image
-    command: [ "nginx-entrypoint.sh" ]
     environment:
       BACKEND: backend:8000
       SOCKETIO: websocket:9000
       FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-$${host}}
-      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
-      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
-      UPSTREAM_REAL_IP_RECURSIVE: "off"
-      PROXY_READ_TIMEOUT: "120"
-      CLIENT_MAX_BODY_SIZE: 50m
+      UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
+      UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
+      UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
+      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-120}
+      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+    command: ["nginx-entrypoint.sh"]
     volumes:
       - sites:/home/frappe/frappe-bench/sites
     depends_on:
       - backend
       - websocket
 
-  # job one-shot para crear el sitio SOLO una vez
+  # 1) Crear el sitio (una sola vez). Tras OK, se auto-exit.
   create-site:
-    <<: *backend
-    restart: "no"
+    image: frappe/erpnext:version-15
+    depends_on:
+      - db
+      - redis-cache
+      - redis-queue
+      - redis-socketio
+      - backend
     command:
       - bash
       - -lc
@@ -96,22 +109,22 @@ services:
         bench new-site crm.apps.asomstudio.ai
         --mariadb-root-password 'superStrongRootPass_9H!x'
         --admin-password 'Admin_1sStrong'
-        --db-name frappe
-        --verbose;
-        bench --site crm.apps.asomstudio.ai set-config enable_scheduler 1;
-        bench --site crm.apps.asomstudio.ai enable-scheduler;
-        bench --site crm.apps.asomstudio.ai install-app crm
-    depends_on:
-      db:
-        condition: service_started
-      redis-cache:
-        condition: service_started
-      redis-queue:
-        condition: service_started
-      redis-socketio:
-        condition: service_started
-      backend:
-        condition: service_started
+        --db-name frappe --verbose
+        && bench --site crm.apps.asomstudio.ai set-config enable_scheduler 1
+    restart: "no"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - assets:/home/frappe/frappe-bench/sites/assets
+
+  # 2) Instalar la app CRM sobre el sitio (una sola vez). Tras OK, se auto-exit.
+  post-install-crm:
+    <<: *backend
+    command:
+      - bash
+      - -lc
+      - >
+        bench --site crm.apps.asomstudio.ai list-apps | grep -qi '^crm$'
+        || (bench --site crm.apps.asomstudio.ai install-app crm && echo 'CRM installed');
 
 volumes:
   sites:
