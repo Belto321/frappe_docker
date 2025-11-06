@@ -1,24 +1,49 @@
+version: "3.9"
+
 x-image: &image
   image: frappe/erpnext:version-15
   restart: unless-stopped
 
-# Anchor que dice “arrancá después de configurator”
+# Los servicios que arrancan DESPUÉS del configurator
 x-after_cfg: &after_cfg
   depends_on:
     configurator:
       condition: service_completed_successfully
 
-# ------------------------
 services:
-  # 1) CONFIGURATOR: NO usar *after_cfg
+  # Infra básica
+  redis-cache:
+    image: redis:6-alpine
+    restart: unless-stopped
+
+  redis-queue:
+    image: redis:6-alpine
+    restart: unless-stopped
+
+  redis-socketio:
+    image: redis:6-alpine
+    restart: unless-stopped
+
+  db:
+    image: mariadb:10.6
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-superStrongRootPass_9H!x}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$${MYSQL_ROOT_PASSWORD} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - db-data:/var/lib/mysql
+
+  # NO usar *after_cfg aquí (si no, crea ciclo)
   configurator:
     <<: *image
     platform: linux/amd64
-    # (si tenés entrypoint/command acá, dejalos igual)
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - assets:/home/frappe/frappe-bench/sites/assets
-    # opcional: que espere que DB/Redis estén arriba
     depends_on:
       db:
         condition: service_healthy
@@ -28,9 +53,17 @@ services:
         condition: service_started
       redis-socketio:
         condition: service_started
+    entrypoint: ["bash","-lc"]
+    command: >
+      ls -1 apps > sites/apps.txt;
+      bench set-config -g db_host db;
+      bench set-config -gp db_port 3306;
+      bench set-config -g redis_cache "redis://redis-cache";
+      bench set-config -g redis_queue "redis://redis-queue";
+      bench set-config -g redis_socketio "redis://redis-socketio";
+      bench set-config -gp socketio_port 9000;
     restart: on-failure
 
-  # 2) BACKEND: sí usa *after_cfg
   backend:
     <<: [*image, *after_cfg]
     platform: linux/amd64
@@ -48,21 +81,21 @@ services:
   queue-short:
     <<: [*image, *after_cfg]
     platform: linux/amd64
-    command: bench worker --queue short,default
+    command: ["bench","worker","--queue","short,default"]
     volumes:
       - sites:/home/frappe/frappe-bench/sites
 
   queue-long:
     <<: [*image, *after_cfg]
     platform: linux/amd64
-    command: bench worker --queue long,default,short
+    command: ["bench","worker","--queue","long,default,short"]
     volumes:
       - sites:/home/frappe/frappe-bench/sites
 
   scheduler:
     <<: [*image, *after_cfg]
     platform: linux/amd64
-    command: bench schedule
+    command: ["bench","schedule"]
     volumes:
       - sites:/home/frappe/frappe-bench/sites
 
@@ -73,7 +106,6 @@ services:
     environment:
       BACKEND: backend:8000
       SOCKETIO: websocket:9000
-      # mantiene el default escapado
       FRAPPE_SITE_NAME_HEADER: ${FRAPPE_SITE_NAME_HEADER:-$${host}}
       UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
       UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
@@ -87,3 +119,4 @@ services:
 volumes:
   sites:
   assets:
+  db-data:
